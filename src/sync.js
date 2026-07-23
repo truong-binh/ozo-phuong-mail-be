@@ -54,13 +54,30 @@ function toRow({ email, message, extracted }) {
 // Xử lý 1 danh sách message: chạy Groq, chỉ giữ thư mời, upsert vào Supabase.
 // Upsert theo gmail_id => mail cũ không bị trùng, mail mới tự thêm.
 export async function processMessages(email, messages) {
-  const stats = { scanned: messages.length, candidates: 0, offers: 0, saved: 0, skipped: 0 };
+  const stats = {
+    scanned: messages.length, candidates: 0, alreadySaved: 0, offers: 0, saved: 0, skipped: 0,
+  };
 
   // Bước 1: lọc thô bằng từ khoá (không tốn LLM)
-  const candidates = messages.filter(looksLikeOffer);
+  let candidates = messages.filter(looksLikeOffer);
   stats.candidates = candidates.length;
   stats.skipped = messages.length - candidates.length;
-  console.log(`[sync] quét ${messages.length} email, ${candidates.length} email nghi là thư mời`);
+
+  // Bước 1b: bỏ qua email đã có trong DB => KHÔNG gọi lại Groq (tiết kiệm hạn mức AI)
+  const ids = candidates.map((m) => m.id);
+  if (ids.length) {
+    const { data: existing } = await supabase
+      .from('job_offers')
+      .select('gmail_id')
+      .in('gmail_id', ids);
+    const seen = new Set((existing || []).map((r) => r.gmail_id));
+    const before = candidates.length;
+    candidates = candidates.filter((m) => !seen.has(m.id));
+    stats.alreadySaved = before - candidates.length;
+  }
+
+  console.log(`[sync] quét ${messages.length} email, ${stats.candidates} nghi là thư mời, ` +
+    `${stats.alreadySaved} đã có sẵn, ${candidates.length} email mới cần trích xuất`);
   candidates.forEach((m) => console.log(`   • "${m.subject}"`));
 
   // Bước 2: gọi Groq song song (tối đa 5 luồng) — đưa cả tiêu đề + nội dung

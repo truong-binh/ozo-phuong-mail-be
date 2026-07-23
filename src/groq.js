@@ -44,10 +44,31 @@ const EMPTY = {
   contact_person: '', contact_phone: '', response_deadline: '', summary: '',
 };
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Gọi Groq, tự thử lại khi bị giới hạn tốc độ (429) — quan trọng với gói free.
+async function callWithRetry(params, tries = 4) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await groq.chat.completions.create(params);
+    } catch (e) {
+      const status = e?.status || e?.response?.status;
+      if (status === 429 && attempt < tries) {
+        // Ưu tiên thời gian chờ Groq gợi ý, nếu không thì backoff tăng dần
+        const retryAfter = Number(e?.headers?.['retry-after']) || attempt * 3;
+        console.warn(`[groq] 429 rate limit, chờ ${retryAfter}s rồi thử lại (lần ${attempt})`);
+        await sleep(retryAfter * 1000);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 export async function extractOffer(emailText) {
   if (!emailText || emailText.trim().length < 20) return { ...EMPTY };
 
-  const completion = await groq.chat.completions.create({
+  const completion = await callWithRetry({
     model: MODEL,
     temperature: 0,
     response_format: { type: 'json_object' },
