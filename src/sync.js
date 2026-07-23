@@ -3,15 +3,24 @@ import { fetchRecentMessages } from './google.js';
 import { extractOffer } from './groq.js';
 import { mapLimit } from './util.js';
 
-// Lọc thô bằng từ khoá: email không chứa dấu hiệu "thư mời/trúng tuyển"
+// Bỏ dấu tiếng Việt để so khớp không phụ thuộc cách gõ dấu (NFC/NFD) hay thiếu dấu.
+function noAccent(s) {
+  return (s || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/đ/gi, 'd')
+    .toLowerCase();
+}
+
+// Lọc thô bằng từ khoá (đã bỏ dấu): email không có dấu hiệu "thư mời/trúng tuyển"
 // thì bỏ qua luôn, KHÔNG gọi Groq => nhanh hơn nhiều.
 const OFFER_KEYWORDS = [
-  'trúng tuyển', 'thư mời nhận việc', 'nhận việc', 'thử việc', 'thử thách',
-  'hội đồng tuyển dụng', 'mời nhận việc', 'offer', 'onboard',
-];
+  'trung tuyen', 'thu moi nhan viec', 'nhan viec', 'thu viec', 'thu thach',
+  'hoi dong tuyen dung', 'moi nhan viec', 'offer', 'onboard',
+].map(noAccent);
 
 function looksLikeOffer(message) {
-  const text = `${message.subject || ''}\n${message.body || ''}`.toLowerCase();
+  const text = noAccent(`${message.subject || ''}\n${message.body || ''}`);
   return OFFER_KEYWORDS.some((k) => text.includes(k));
 }
 
@@ -45,14 +54,19 @@ function toRow({ email, message, extracted }) {
 // Xử lý 1 danh sách message: chạy Groq, chỉ giữ thư mời, upsert vào Supabase.
 // Upsert theo gmail_id => mail cũ không bị trùng, mail mới tự thêm.
 export async function processMessages(email, messages) {
-  const stats = { scanned: messages.length, offers: 0, saved: 0, skipped: 0 };
+  const stats = { scanned: messages.length, candidates: 0, offers: 0, saved: 0, skipped: 0 };
 
   // Bước 1: lọc thô bằng từ khoá (không tốn LLM)
   const candidates = messages.filter(looksLikeOffer);
+  stats.candidates = candidates.length;
   stats.skipped = messages.length - candidates.length;
+  console.log(`[sync] quét ${messages.length} email, ${candidates.length} email nghi là thư mời`);
+  candidates.forEach((m) => console.log(`   • "${m.subject}"`));
 
-  // Bước 2: gọi Groq song song (tối đa 5 luồng để tránh giới hạn tốc độ)
-  const extractedList = await mapLimit(candidates, 5, (m) => extractOffer(m.body));
+  // Bước 2: gọi Groq song song (tối đa 5 luồng) — đưa cả tiêu đề + nội dung
+  const extractedList = await mapLimit(candidates, 5, (m) =>
+    extractOffer(`Tiêu đề: ${m.subject}\n\n${m.body}`),
+  );
 
   // Bước 3: chỉ giữ cái Groq xác nhận là thư mời, upsert song song
   const rows = [];
@@ -62,6 +76,7 @@ export async function processMessages(email, messages) {
       rows.push(toRow({ email, message: candidates[i], extracted }));
     } else {
       stats.skipped++;
+      console.log(`[sync] Groq cho rằng KHÔNG phải thư mời: "${candidates[i].subject}"`);
     }
   });
 
@@ -73,6 +88,7 @@ export async function processMessages(email, messages) {
     else stats.saved++;
   });
 
+  console.log('[sync] kết quả:', stats);
   return stats;
 }
 
