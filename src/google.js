@@ -84,23 +84,38 @@ export async function fetchRecentMessages(account, { maxResults = 25, query = ''
   // Gmail KHÔNG đảm bảo trả đủ maxResults trong 1 trang: khi có bộ lọc `q`,
   // nó quét từng khối và thường trả về một phần kèm nextPageToken.
   // => phải lặp theo token cho tới khi đủ số lượng hoặc hết mail.
+  console.log(`[gmail] === BẮT ĐẦU LẤY MAIL ===`);
+  console.log(`[gmail] maxResults=${maxResults}`);
+  console.log(`[gmail] query (q gửi Gmail) = ${query ? JSON.stringify(query) : '(trống — lấy mail gần nhất)'}`);
+
   const messages = [];
   let pageToken;
   let pages = 0;
   do {
+    const perPage = Math.min(500, maxResults - messages.length); // Gmail cap 500/trang
     const list = await gmail.users.messages.list({
       userId: 'me',
-      maxResults: Math.min(500, maxResults - messages.length), // Gmail cap 500/trang
+      maxResults: perPage,
       q: query || undefined,
       pageToken,
     });
-    messages.push(...(list.data.messages || []));
+    const batch = list.data.messages || [];
+    messages.push(...batch);
     pageToken = list.data.nextPageToken;
     pages++;
+    console.log(`[gmail] trang ${pages}: yêu cầu ${perPage}, nhận ${batch.length} mail, ` +
+      `resultSizeEstimate=${list.data.resultSizeEstimate ?? '?'}, ` +
+      `nextPageToken=${pageToken ? 'CÓ (còn trang sau)' : 'KHÔNG (hết)'}, ` +
+      `tổng gom được=${messages.length}`);
   } while (pageToken && messages.length < maxResults);
 
-  console.log(`[gmail] ${messages.length} email khớp bộ lọc (${pages} trang)` +
-    `${pageToken ? ', vẫn còn nữa — tăng GMAIL_MAX_RESULTS nếu muốn lấy hết' : ''}`);
+  console.log(`[gmail] === KẾT THÚC: ${messages.length} email khớp bộ lọc sau ${pages} trang ===`);
+  if (pageToken) console.log('[gmail] (dừng vì đã đủ maxResults, Gmail vẫn còn mail — tăng GMAIL_MAX_RESULTS nếu muốn lấy hết)');
+  if (messages.length <= 10 && pages === 1 && !pageToken && query) {
+    console.log('[gmail] ⚠️  Chỉ 1 trang và không có trang sau => Gmail thật sự chỉ tìm thấy bấy nhiêu mail KHỚP QUERY.');
+    console.log('[gmail] ⚠️  Vấn đề nằm ở CÂU QUERY, KHÔNG phải phân trang. Thử dán query này vào ô tìm kiếm Gmail để kiểm chứng:');
+    console.log(`[gmail] ⚠️      ${query}`);
+  }
 
   // Lấy nội dung các email song song (tối đa 8 luồng) cho nhanh
   return mapLimit(messages, 8, async (m) => {

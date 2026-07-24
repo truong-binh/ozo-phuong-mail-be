@@ -64,6 +64,15 @@ export async function processMessages(email, messages) {
   stats.candidates = candidates.length;
   stats.skipped = messages.length - candidates.length;
 
+  // CHẨN ĐOÁN: cho xem tiêu đề của TẤT CẢ mail Gmail trả về + có qua được lọc từ khoá không.
+  console.log(`[sync] === PHỄU LỌC ===`);
+  console.log(`[sync] Gmail trả về ${messages.length} mail. Xét từng cái:`);
+  messages.forEach((m, i) => {
+    const pass = looksLikeOffer(m);
+    console.log(`[sync]  ${String(i + 1).padStart(2)}. [${pass ? 'GIỮ ' : 'LOẠI'}] "${m.subject}" — từ ${m.from}`);
+  });
+  console.log(`[sync] => ${stats.candidates}/${messages.length} mail qua lọc từ khoá`);
+
   // Bước 1b: bỏ qua email đã có trong DB => KHÔNG gọi lại Groq (tiết kiệm hạn mức AI)
   const ids = candidates.map((m) => m.id);
   if (ids.length) {
