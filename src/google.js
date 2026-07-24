@@ -81,13 +81,26 @@ function header(headers, name) {
 export async function fetchRecentMessages(account, { maxResults = 25, query = '' } = {}) {
   const { gmail } = gmailClientFromAccount(account);
 
-  const list = await gmail.users.messages.list({
-    userId: 'me',
-    maxResults,
-    q: query || undefined,
-  });
+  // Gmail KHÔNG đảm bảo trả đủ maxResults trong 1 trang: khi có bộ lọc `q`,
+  // nó quét từng khối và thường trả về một phần kèm nextPageToken.
+  // => phải lặp theo token cho tới khi đủ số lượng hoặc hết mail.
+  const messages = [];
+  let pageToken;
+  let pages = 0;
+  do {
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: Math.min(500, maxResults - messages.length), // Gmail cap 500/trang
+      q: query || undefined,
+      pageToken,
+    });
+    messages.push(...(list.data.messages || []));
+    pageToken = list.data.nextPageToken;
+    pages++;
+  } while (pageToken && messages.length < maxResults);
 
-  const messages = list.data.messages || [];
+  console.log(`[gmail] ${messages.length} email khớp bộ lọc (${pages} trang)` +
+    `${pageToken ? ', vẫn còn nữa — tăng GMAIL_MAX_RESULTS nếu muốn lấy hết' : ''}`);
 
   // Lấy nội dung các email song song (tối đa 8 luồng) cho nhanh
   return mapLimit(messages, 8, async (m) => {

@@ -55,7 +55,8 @@ function toRow({ email, message, extracted }) {
 // Upsert theo gmail_id => mail cũ không bị trùng, mail mới tự thêm.
 export async function processMessages(email, messages) {
   const stats = {
-    scanned: messages.length, candidates: 0, alreadySaved: 0, offers: 0, saved: 0, skipped: 0,
+    scanned: messages.length, candidates: 0, alreadySaved: 0,
+    offers: 0, saved: 0, skipped: 0, failed: 0,
   };
 
   // Bước 1: lọc thô bằng từ khoá (không tốn LLM)
@@ -80,29 +81,42 @@ export async function processMessages(email, messages) {
     `${stats.alreadySaved} đã có sẵn, ${candidates.length} email mới cần trích xuất`);
   candidates.forEach((m) => console.log(`   • "${m.subject}"`));
 
-  // Bước 2: gọi Groq song song (tối đa 5 luồng) — đưa cả tiêu đề + nội dung
-  const extractedList = await mapLimit(candidates, 5, (m) =>
-    extractOffer(`Tiêu đề: ${m.subject}\n\n${m.body}`),
-  );
+  // Bước 2+3: trích xuất RỒI LƯU NGAY từng email.
+  // Lưu ngay (thay vì gom cuối) để nếu Groq hết hạn mức giữa chừng thì phần đã
+  // xong vẫn nằm trong DB — lần đồng bộ sau chỉ chạy tiếp phần còn thiếu.
+  // Luồng để thấp vì gói free Groq giới hạn theo token/phút; chạy nhiều luồng
+  // chỉ khiến 429 sớm hơn chứ không nhanh hơn.
+  const concurrency = Number(process.env.GROQ_CONCURRENCY || 2);
+  let done = 0;
 
-  // Bước 3: chỉ giữ cái Groq xác nhận là thư mời, upsert song song
-  const rows = [];
-  extractedList.forEach((extracted, i) => {
-    if (extracted.is_offer) {
-      stats.offers++;
-      rows.push(toRow({ email, message: candidates[i], extracted }));
-    } else {
-      stats.skipped++;
-      console.log(`[sync] Groq cho rằng KHÔNG phải thư mời: "${candidates[i].subject}"`);
+  await mapLimit(candidates, concurrency, async (m) => {
+    let extracted;
+    try {
+      extracted = await extractOffer(`Tiêu đề: ${m.subject}\n\n${m.body}`);
+    } catch (e) {
+      // Một email lỗi KHÔNG được làm chết cả mẻ — bỏ qua, lần sau quét lại.
+      stats.failed++;
+      console.error(`[sync] trích xuất lỗi "${m.subject}": ${e.message}`);
+      return;
     }
-  });
 
-  await mapLimit(rows, 5, async (row) => {
+    if (!extracted.is_offer) {
+      stats.skipped++;
+      console.log(`[sync] Groq cho rằng KHÔNG phải thư mời: "${m.subject}"`);
+      return;
+    }
+
+    stats.offers++;
     const { error } = await supabase
       .from('job_offers')
-      .upsert(row, { onConflict: 'gmail_id' });
+      .upsert(toRow({ email, message: m, extracted }), { onConflict: 'gmail_id' });
     if (error) console.error('[sync] upsert lỗi:', error.message);
     else stats.saved++;
+
+    done++;
+    if (done % 10 === 0 || done === candidates.length) {
+      console.log(`[sync] tiến độ ${done}/${candidates.length} email đã xử lý`);
+    }
   });
 
   console.log('[sync] kết quả:', stats);

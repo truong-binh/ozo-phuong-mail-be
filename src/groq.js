@@ -46,21 +46,30 @@ const EMPTY = {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Gọi Groq, tự thử lại khi bị giới hạn tốc độ (429) — quan trọng với gói free.
-async function callWithRetry(params, tries = 4) {
+// Đọc thời gian chờ Groq gợi ý. Header có thể là "12" hoặc "7.66s".
+function retryAfterSeconds(e) {
+  const h = e?.headers || {};
+  const raw = h['retry-after'] ?? h['x-ratelimit-reset-tokens'] ?? h['x-ratelimit-reset-requests'];
+  const n = parseFloat(String(raw));
+  return Number.isFinite(n) && n > 0 ? Math.min(n + 1, 90) : 0;
+}
+
+// Gọi Groq, tự thử lại khi bị giới hạn tốc độ (429) hoặc lỗi tạm thời (5xx).
+// Gói free giới hạn theo TOKEN/PHÚT, nên quét nhiều mail bắt buộc phải chờ —
+// thử lại nhiều lần với thời gian Groq trả về, thay vì bỏ cuộc sớm.
+async function callWithRetry(params, tries = 8) {
   for (let attempt = 1; ; attempt++) {
     try {
       return await groq.chat.completions.create(params);
     } catch (e) {
       const status = e?.status || e?.response?.status;
-      if (status === 429 && attempt < tries) {
-        // Ưu tiên thời gian chờ Groq gợi ý, nếu không thì backoff tăng dần
-        const retryAfter = Number(e?.headers?.['retry-after']) || attempt * 3;
-        console.warn(`[groq] 429 rate limit, chờ ${retryAfter}s rồi thử lại (lần ${attempt})`);
-        await sleep(retryAfter * 1000);
-        continue;
-      }
-      throw e;
+      const retryable = status === 429 || (status >= 500 && status < 600);
+      if (!retryable || attempt >= tries) throw e;
+
+      // Ưu tiên thời gian chờ Groq gợi ý, nếu không thì backoff tăng dần (tối đa 60s)
+      const wait = retryAfterSeconds(e) || Math.min(2 ** attempt, 60);
+      console.warn(`[groq] ${status}, chờ ${wait}s rồi thử lại (lần ${attempt}/${tries})`);
+      await sleep(wait * 1000);
     }
   }
 }

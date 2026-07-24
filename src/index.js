@@ -74,13 +74,24 @@ app.get('/api/offers', requireAuth, async (req, res) => {
 });
 
 // Đồng bộ Gmail thật -> trích xuất -> lưu
+// Lần quét đầu có thể mất 10-20 phút (Groq free giới hạn token/phút), trong khi
+// web tự gọi lại mỗi 60s => phải khoá, không cho 1 tài khoản chạy 2 lượt cùng lúc.
+const syncing = new Set();
+
 app.post('/api/sync', requireAuth, async (req, res) => {
+  const email = req.user.email;
+  if (syncing.has(email)) {
+    return res.json({ ok: true, running: true, stats: { scanned: 0, saved: 0 } });
+  }
+  syncing.add(email);
   try {
-    const stats = await syncAccount(req.user.email);
+    const stats = await syncAccount(email);
     res.json({ ok: true, stats });
   } catch (e) {
     console.error('[sync]', e);
     res.status(500).json({ error: e.message });
+  } finally {
+    syncing.delete(email);
   }
 });
 
